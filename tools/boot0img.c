@@ -24,6 +24,11 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#define pr_info(...) \
+	do { \
+		if (!quiet) fprintf(stderr, __VA_ARGS__); \
+	} while (0)
+
 enum header_offsets {				/* in words of 4 bytes */
 	HEADER_JUMP_INS	= 0,
 	HEADER_MAGIC	= 1,
@@ -303,8 +308,7 @@ int main(int argc, char **argv)
 	}
 
 	if (uboot_fname) {
-		if (!quiet)
-			fprintf(stderr, "U-Boot: %s: ", uboot_fname);
+		pr_info("U-Boot: %s: ", uboot_fname);
 
 		uboot_size = read_file(uboot_fname, &uboot_buf);
 		if (uboot_size < 0) {
@@ -312,8 +316,7 @@ int main(int argc, char **argv)
 			return 3;
 		}
 
-		if (!quiet)
-			fprintf(stderr, "%zd Bytes\n", uboot_size);
+		pr_info("%zd Bytes\n", uboot_size);
 
 		uboot_buf = realloc_zero(uboot_buf, &uboot_size,
 					 ALIGN(uboot_size, 512));
@@ -345,8 +348,7 @@ int main(int argc, char **argv)
 	}
 
 	if (dram_fname) {
-		if (!quiet)
-			fprintf(stderr, "DRAM  : %s", dram_fname);
+		pr_info("DRAM  : %s  ", dram_fname);
 
 		if (!strncmp(dram_fname, "trampoline64:", 13) ||
 		    !strncmp(dram_fname, "trampoline32:", 13)) {
@@ -373,8 +375,7 @@ int main(int argc, char **argv)
 				dram_buf[1] = htole32(0xe12fff1c);
 				dram_buf[2] = htole32(address);
 			}
-			if (!quiet)
-				fprintf(stderr, "\n");
+			pr_info("\n");
 		} else {
 			dram_size = read_file(dram_fname, (char**)&dram_buf);
 			if (dram_size < 0) {
@@ -382,8 +383,7 @@ int main(int argc, char **argv)
 				return 3;
 			}
 
-			if (!quiet)
-				fprintf(stderr, "%zd Bytes\n", dram_size);
+			pr_info("%zd Bytes\n", dram_size);
 		}
 
 		dram_buf = realloc_zero(dram_buf, &dram_size,
@@ -396,8 +396,7 @@ int main(int argc, char **argv)
 		offset += dram_size;
 	}
 
-	if (!quiet)
-		fprintf(stderr, "SRAM  : %s: ", sram_fname);
+	pr_info("SRAM  : %s  ", sram_fname);
 
 	sram_size = read_file(sram_fname, (char **)&sram_buf);
 	if (sram_size < 0) {
@@ -405,8 +404,7 @@ int main(int argc, char **argv)
 		return 3;
 	}
 
-	if (!quiet)
-		fprintf(stderr, "%zd Bytes\n", sram_size);
+	pr_info("%zd Bytes\n", sram_size);
 
 	if (arisc_addr)
 		sram_size += 0x4000;
