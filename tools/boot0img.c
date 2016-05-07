@@ -57,13 +57,24 @@ enum header_offsets {				/* in words of 4 bytes */
 static uint32_t calc_checksum(void *buffer, size_t length)
 {
 	uint32_t *buf = buffer;
-	uint32_t sum = 0;
-	size_t i;
+	register uint32_t sum = 0;
 
-	for (i = 0; i < length / 4; i++)
-		sum += buf[i];
+	for (; length >= 4; length -= 4)
+		sum += *buf++;
 
 	return sum;
+}
+
+static uint32_t checksum_buffer(void *buffer, size_t size, uint32_t *old_checksum)
+{
+	if (old_checksum) /* old_checksum = uint32_t value at offset +12 */
+		*old_checksum = ((uint32_t *)buffer)[3];
+
+	uint32_t checksum = CHECKSUM_SEED;
+	checksum += calc_checksum(buffer, 12);
+	checksum += calc_checksum(buffer + 16, size - 16);
+
+	return checksum;
 }
 
 #define CHUNK_SIZE 262144
@@ -152,16 +163,13 @@ static int checksum_file(const char *filename, bool verbose)
 	if (size < 0)
 		return size;
 
-	checksum = calc_checksum(buffer, 12);
-	old_checksum = calc_checksum(buffer + 12, 4);
-	checksum += calc_checksum(buffer + 16, size - 16);
+	checksum = checksum_buffer(buffer, size, &old_checksum);
 
 	if (verbose) {
 		printf("%s: %zd Bytes\n", filename, size);
 		printf("nominal checksum: 0x%08x\n",
-			checksum + old_checksum);
+			checksum - CHECKSUM_SEED + old_checksum);
 	}
-	checksum += CHECKSUM_SEED;
 	fprintf(stdout, "0x%08x\n", checksum);
 	if (verbose) {
 		printf("00000000  %02x %02x %02x %02x\n",
