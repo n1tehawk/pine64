@@ -29,6 +29,21 @@
 		if (!quiet) fprintf(stderr, __VA_ARGS__); \
 	} while (0)
 
+/* TRY { ... } FINALLY is syntactic sugar for creating an explicit
+ * do { ... } while (0); block. The idea is that such a block can
+ * be left with a "break" statement in case of errors, to properly
+ * handle cleaning up etc.
+ */
+#define TRY		do
+#define FINALLY		while (0);
+
+/* We'll be using logical blocks based on a sector size of 512 bytes. */
+#define SECTOR_SHIFT	9
+/* These macro converts LBA values to and from byte offsets. */
+#define LBA(sector)	((sector) << SECTOR_SHIFT)
+#define SECTORS(offset)	((offset) >> SECTOR_SHIFT)
+
+
 enum header_offsets {				/* in words of 4 bytes */
 	HEADER_JUMP_INS	= 0,
 	HEADER_MAGIC	= 1,
@@ -45,12 +60,14 @@ enum header_offsets {				/* in words of 4 bytes */
 
 #define CHECKSUM_SEED	0x5F0A6C39
 
-#define BOOT0_OFFSET	8192
-#define BOOT0_SIZE	32768
-#define BOOT0_END_KB	((BOOT0_OFFSET + BOOT0_SIZE) / 1024)
+/* known/fixed offsets and sizes, see the description in Booting.md */
+#define BOOT0_OFFSET	LBA(16)
+#define BOOT0_SIZE	LBA(64) /* 32 KiB */
+#define BOOT0_END	(BOOT0_OFFSET + BOOT0_SIZE)
 #define BOOT0_ALIGN	0x4000
 #define UBOOT_LOAD_ADDR	0x4a000000
-#define UBOOT_OFFSET_KB	19096
+#define UBOOT_OFFSET	LBA(38192)
+#define PART_OFFSET	LBA(40960) /* table of named partitions */
 
 #define ALIGN(x, a) ((((x) + (a) - 1) / (a)) * (a))
 
@@ -107,6 +124,33 @@ static ssize_t read_file(const char *filename, char **buffer_addr)
 	return len;
 }
 
+ssize_t write_file(const char *filename, void *data, size_t size)
+{
+	ssize_t rc;
+	FILE *out = fopen(filename, "wb");
+	if (!out) {
+		rc = errno;
+		fprintf(stderr, "file_save() failed to open \"%s\": %s\n",
+			filename, strerror(rc));
+		return -rc;
+	}
+	rc = fwrite(data, 1, size, out);
+	if (ferror(out))
+		rc = -errno;
+	fclose(out);
+	return rc;
+}
+
+ssize_t write_safe(const char *filename, void *data, size_t size)
+{
+	if (access(filename, F_OK) == 0) {
+		fprintf(stderr, "refusing to overwrite existing \"%s\"\n",
+			filename);
+		return -EEXIST;
+	}
+	return write_file(filename, data, size);
+}
+
 static void usage(const char *progname, FILE *stream)
 {
 	fprintf(stream, "boot0img: assemble an Allwinner boot image for boot0\n"
@@ -114,6 +158,7 @@ static void usage(const char *progname, FILE *stream)
 			"         [-u u-boot-dtb.bin] -d bl31.bin -s scp.bin [-a addr]\n",
 			progname);
 	fprintf(stream, "       %s [-c file]\n", progname);
+	fprintf(stream, "       %s -x <file or device>\n", progname);
 	fprintf(stream, "  -h|--help: this help output\n"
 			"  -q|--quiet: be less verbose\n"
 			"  -o|--output: output file name, stdout if omitted\n"
@@ -124,6 +169,7 @@ static void usage(const char *progname, FILE *stream)
 			"  -d|--dram: image file to write into DRAM\n"
 			"  -a|--arisc_entry: reset vector address for arisc\n"
 			"  -e|--embedded_header: use header from U-Boot binary\n"
+			"  -x|--extract: create boot0.img, bl31.bin and scp.bin from existing image\n"
 			"\nGiving a boot0 image name will create an image which"
 			" can be written directly\nto an SD card. Otherwise"
 			" just the blob with the secondary firmware parts will"
@@ -215,17 +261,168 @@ static int copy_boot0(FILE *outf, const char *boot0fname)
 	fwrite(buffer, size, 1, outf);
 
 	if (zerobuf) {
-		int i = (UBOOT_OFFSET_KB - BOOT0_END_KB) / 8;
+		int i = (UBOOT_OFFSET - BOOT0_END) / BOOT0_OFFSET;
 		while (i-- > 0)
 			fwrite(zerobuf, 1, BOOT0_OFFSET, outf);
 
 		free(zerobuf);
 	} else {
-		fseek(outf, (UBOOT_OFFSET_KB - BOOT0_END_KB) * 1024, SEEK_CUR);
+		fseek(outf, UBOOT_OFFSET - BOOT0_END, SEEK_CUR);
 	}
 
 	free(buffer);
 	return 0;
+}
+
+static int extract_image(const char *filename)
+{
+	void *boot0;
+	uint32_t *uboot;
+	uint32_t checksum, old_checksum;
+	bool quiet = false;
+	int rc = 0;
+
+	FILE *image = fopen(filename, "rb");
+	if (!image) {
+		fprintf(stderr, "extract_image() failed to open \"%s\": %s\n",
+			filename, strerror(errno));
+		return 1;
+	}
+
+	TRY {
+		/*
+		 * Extract boot0.img
+		 */
+		pr_info("Extracting boot0.img...\n");
+		if (fseek(image, BOOT0_OFFSET, SEEK_SET)) {
+			perror("extract_image() boot0 fseek");
+			rc = 1;
+			break;
+		}
+		boot0 = malloc(BOOT0_SIZE);
+		if (!boot0) {
+			perror("extract_image() boot0 alloc");
+			rc = 1;
+			break;
+		}
+		if (!fread(boot0, BOOT0_SIZE, 1, image)) {
+			perror("extract_image() boot0 fread");
+			rc = 1;
+			free(boot0);
+			break;
+		}
+		checksum = checksum_buffer(boot0, BOOT0_SIZE, &old_checksum);
+		if (checksum != old_checksum) {
+			fprintf(stderr, "extract_image() boot0 failed validation\n");
+			rc = 1;
+			free(boot0);
+			break;
+		}
+		if (write_safe("boot0.img", boot0, BOOT0_SIZE) <= 0) {
+			fprintf(stderr, "extract_image() failed to write boot0\n");
+			rc = 1;
+			free(boot0);
+			break;
+		}
+		free(boot0);
+		/*
+		 * Load U-Boot, extract ATF and SCP
+		 */
+		pr_info("Reading uboot...\n");
+		if (fseek(image, UBOOT_OFFSET, SEEK_SET)) {
+			perror("extract_image() uboot fseek");
+			rc = 1;
+			break;
+		}
+		/* Start by reading only the header */
+		uboot = malloc(HEADER_SIZE);
+		if (!uboot) {
+			perror("extract_image() uboot alloc");
+			rc = 1;
+			break;
+		}
+		if (!fread(uboot, HEADER_SIZE, 1, image)) {
+			perror("extract_image() uboot header fread");
+			rc = 1;
+			free(uboot);
+			break;
+		}
+		pr_info("U-Boot at 0x%08X, size 0x%X (%u bytes = %u sectors)\n",
+			UBOOT_OFFSET, uboot[HEADER_LENGTH], uboot[HEADER_LENGTH],
+			SECTORS(uboot[HEADER_LENGTH]));
+		if (UBOOT_OFFSET + uboot[HEADER_LENGTH] > PART_OFFSET) {
+			/* uboot cannot extend beyond table of named partitions? */
+			fprintf(stderr, "extract_image() invalid uboot length\n");
+			rc = 1;
+			free(uboot);
+			break;
+		}
+		/* Resize buffer, read entire uboot */
+		uboot = realloc(uboot, uboot[HEADER_LENGTH]);
+		if (!uboot) {
+			perror("extract_image() uboot realloc");
+			rc = 1;
+			break;
+		}
+		fseek(image, UBOOT_OFFSET, SEEK_SET);
+		if (!fread(uboot, uboot[HEADER_LENGTH], 1, image)) {
+			perror("extract_image() uboot fread");
+			rc = 1;
+			free(uboot);
+			break;
+		}
+		checksum = checksum_buffer(uboot, uboot[HEADER_LENGTH], &old_checksum);
+		if (checksum != old_checksum) {
+			fprintf(stderr, "extract_image() uboot failed validation\n");
+			rc = 1;
+			free(uboot);
+			break;
+		}
+		/* For now we expect exactly two firmware entries.
+		 * Let's do some sanity checks on them: non-zero rc -> error */
+		uint32_t n = uboot[HEADER_SECS + 0] + uboot[HEADER_SECS + 1];
+		if (n > uboot[HEADER_LENGTH])
+			rc = 10;
+		if (uboot[HEADER_SECS + 8] != n)
+			rc = 11;
+		n += uboot[HEADER_SECS + 9];
+		if (n > uboot[HEADER_LENGTH])
+			rc = 12;
+		for (n = 2; n < 8; n++) /* remaining entries should be empty */
+			if (uboot[HEADER_SECS + n * 8 + 0] != 0 ||
+			    uboot[HEADER_SECS + n * 8 + 1] != 0) {
+				rc = 13;
+			}
+		if (rc) {
+			fprintf(stderr, "extract_image() secondary header failed validation\n");
+			free(uboot);
+			break;
+		}
+		/* Extract ATF and SCP according to header information */
+		pr_info("Extracting ATF from 0x%08X, size 0x%X (%u bytes = %u sectors)...\n",
+			UBOOT_OFFSET + uboot[HEADER_SECS + 0], uboot[HEADER_SECS + 1],
+			uboot[HEADER_SECS + 1], SECTORS(uboot[HEADER_SECS + 1]));
+		if (write_safe("bl31.bin", (void *)uboot + uboot[HEADER_SECS + 0],
+			       uboot[HEADER_SECS + 1]) <= 0) {
+			fprintf(stderr, "extract_image() failed to write bl31.bin\n");
+			rc = 1;
+			free(uboot);
+			break;
+		}
+		pr_info("Extracting SCP from 0x%08X, size 0x%X (%u bytes = %u sectors)...\n",
+			UBOOT_OFFSET + uboot[HEADER_SECS + 8], uboot[HEADER_SECS + 9],
+			uboot[HEADER_SECS + 9], SECTORS(uboot[HEADER_SECS + 9]));
+		if (write_safe("scp.bin", (void *)uboot + uboot[HEADER_SECS + 8],
+			       uboot[HEADER_SECS + 9]) <= 0) {
+			fprintf(stderr, "extract_image() failed to write scp.bin\n");
+			rc = 1;
+			free(uboot);
+			break;
+		}
+		free(uboot);
+	} FINALLY
+	fclose(image);
+	return rc;
 }
 
 int main(int argc, char **argv)
@@ -241,6 +438,7 @@ int main(int argc, char **argv)
 		{ "embedded_header",	0, 0, 'e' },
 		{ "arisc_entry",1, 0, 'a' },
 		{ "quiet",	0, 0, '0' },
+		{ "extract",	1, 0, 'x' },
 		{ NULL, 0, 0, 0 },
 	};
 	uint32_t *header;
@@ -263,7 +461,7 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	while ((ch = getopt_long(argc, argv, "heqo:u:c:b:s:d:a:",
+	while ((ch = getopt_long(argc, argv, "heqo:u:c:b:s:d:a:x:",
 				 lopts, NULL)) != -1) {
 		switch(ch) {
 		case '?':
@@ -299,6 +497,8 @@ int main(int argc, char **argv)
 		case 'a':
 			arisc_addr = optarg;
 			break;
+		case 'x':
+			return extract_image(optarg);
 		}
 	}
 
@@ -468,7 +668,7 @@ int main(int argc, char **argv)
 
 	if (boot0_fname) {
 		copy_boot0(outf, boot0_fname);
-		offset += UBOOT_OFFSET_KB * 1024;
+		offset += UBOOT_OFFSET;
 	}
 
 	if (!embedded_header)
