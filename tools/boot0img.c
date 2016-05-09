@@ -69,7 +69,7 @@ static ssize_t read_file(const char *filename, char **buffer_addr)
 	char* buffer;
 	size_t len, ret;
 
-	fp = fopen(filename, "r");
+	fp = fopen(filename, "rb");
 	if (fp == NULL)
 		return -errno;
 
@@ -93,32 +93,33 @@ static ssize_t read_file(const char *filename, char **buffer_addr)
 
 static void usage(const char *progname, FILE *stream)
 {
-	fprintf(stream, "boot0img: assemble an Allwinner boot image for boot0\n");
-	fprintf(stream, "usage: %s [-h] [-e] [-o output.img] [-b boot0.img]\n",
-			 progname);
-	fprintf(stream, "         [-u u-boot-dtb.bin] -d bl31.bin -s scp.bin [-a addr]\n");
+	fprintf(stream, "boot0img: assemble an Allwinner boot image for boot0\n"
+			"usage: %s [-h] [-e] [-o output.img] [-b boot0.img]\n"
+			"         [-u u-boot-dtb.bin] -d bl31.bin -s scp.bin [-a addr]\n",
+			progname);
 	fprintf(stream, "       %s [-c file]\n", progname);
-	fprintf(stream, "  -h|--help: this help output\n");
-	fprintf(stream, "  -o|--output: output file name, stdout if omitted\n");
-	fprintf(stream, "  -b|--boot0: boot0 image to embed into the image\n");
-	fprintf(stream, "  -c|--checksum: calculate checksum of file\n");
-	fprintf(stream, "  -u|--uboot: U-Boot image file (without SPL)\n");
-	fprintf(stream, "  -s|--sram: image file to write into SRAM\n");
-	fprintf(stream, "  -d|--dram: image file to write into DRAM\n");
-	fprintf(stream, "  -a|--arisc_entry: reset vector address for arisc\n");
-	fprintf(stream, "  -e|--embedded_header: use header from U-Boot binary\n");
-	fprintf(stream, "\nGiving a boot0 image name will create an image which"
+	fprintf(stream, "  -h|--help: this help output\n"
+			"  -q|--quiet: be less verbose\n"
+			"  -o|--output: output file name, stdout if omitted\n"
+			"  -b|--boot0: boot0 image to embed into the image\n"
+			"  -c|--checksum: calculate checksum of file\n"
+			"  -u|--uboot: U-Boot image file (without SPL)\n"
+			"  -s|--sram: image file to write into SRAM\n"
+			"  -d|--dram: image file to write into DRAM\n"
+			"  -a|--arisc_entry: reset vector address for arisc\n"
+			"  -e|--embedded_header: use header from U-Boot binary\n"
+			"\nGiving a boot0 image name will create an image which"
 			" can be written directly\nto an SD card. Otherwise"
 			" just the blob with the secondary firmware parts will"
-			"\nbe assembled.\n");
-	fprintf(stream, "\nInstead of an actual binary for the DRAM, you can write ARM or AArch64\n");
-	fprintf(stream, "trampoline code into that location. It will jump to the specified address.\n");
-	fprintf(stream, "\t--dram trampoline64:<addr>\n");
-	fprintf(stream, "\t--dram trampoline32:<addr>\n");
-	fprintf(stream, "\nSpecifying an arisc entry address will populate the arisc reset exception\n");
-	fprintf(stream, "vector with an OpenRISC instruction to jump to that specified address.\n");
-	fprintf(stream, "The given SRAM binary will thus be written behind the exception vector area.\n");
-	fprintf(stream, "\t--arisc_entry 0x44008\n");
+			"\nbe assembled.\n"
+			"\nInstead of an actual binary for the DRAM, you can write ARM or AArch64\n"
+			"trampoline code into that location. It will jump to the specified address.\n"
+			"\t--dram trampoline64:<addr>\n"
+			"\t--dram trampoline32:<addr>\n"
+			"\nSpecifying an arisc entry address will populate the arisc reset exception\n"
+			"vector with an OpenRISC instruction to jump to that specified address.\n"
+			"The given SRAM binary will thus be written behind the exception vector area.\n"
+			"\t--arisc_entry 0x44008\n");
 }
 
 /* Do a realloc(), but clear the new part if the new allocation is bigger. */
@@ -151,21 +152,21 @@ static int checksum_file(const char *filename, bool verbose)
 	checksum += calc_checksum(buffer + 16, size - 16);
 
 	if (verbose) {
-		fprintf(stdout, "%s: %zd Bytes\n", filename, size);
-		fprintf(stdout, "nominal checksum: 0x%08x\n",
+		printf("%s: %zd Bytes\n", filename, size);
+		printf("nominal checksum: 0x%08x\n",
 			checksum + old_checksum);
 	}
 	checksum += CHECKSUM_SEED;
 	fprintf(stdout, "0x%08x\n", checksum);
 	if (verbose) {
-		fprintf(stdout, "00000000  %02x %02x %02x %02x\n",
+		printf("00000000  %02x %02x %02x %02x\n",
 			checksum & 0xff, (checksum >> 8) & 0xff,
 			(checksum >> 16) & 0xff, checksum >> 24);
-		fprintf(stdout, "old checksum: 0x%08x, %smatching\n",
+		printf("old checksum: 0x%08x, %smatching\n",
 			old_checksum, old_checksum == checksum ? "" : "NOT ");
 	}
 
-	return !(old_checksum == checksum);
+	return old_checksum != checksum;
 }
 
 static int copy_boot0(FILE *outf, const char *boot0fname)
@@ -201,9 +202,8 @@ static int copy_boot0(FILE *outf, const char *boot0fname)
 	fwrite(buffer, size, 1, outf);
 
 	if (zerobuf) {
-		int i;
-
-		for (i = 0; i < (UBOOT_OFFSET_KB - BOOT0_END_KB) / 8; i++)
+		int i = (UBOOT_OFFSET_KB - BOOT0_END_KB) / 8;
+		while (i-- > 0)
 			fwrite(zerobuf, 1, BOOT0_OFFSET, outf);
 
 		free(zerobuf);
@@ -452,7 +452,7 @@ int main(int argc, char **argv)
 	header[HEADER_CHECKSUM] = htole32(checksum);
 
 	if (out_fname)
-		outf = fopen(out_fname, "w");
+		outf = fopen(out_fname, "wb");
 	else
 		outf = stdout;
 	if (outf == NULL) {
@@ -476,8 +476,10 @@ int main(int argc, char **argv)
 
 	fclose(outf);
 
-	if (out_fname)
-		truncate(out_fname, offset);
+	if (out_fname) {
+		if (truncate(out_fname, offset))
+			perror("error truncating output file");
+	}
 
 	free(uboot_buf);
 	free(sram_buf);
